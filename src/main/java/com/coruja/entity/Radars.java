@@ -40,6 +40,9 @@ public class Radars {
     @BsonProperty("LONGITUDE")
     private Double longitude;
 
+    /** * Campo fixo para a Concessionária.
+     * @BsonIgnore garante que o Mongo não tente ler/gravar essa informação.
+     */
     @BsonIgnore
     private String concessionaria = "Appia";
 
