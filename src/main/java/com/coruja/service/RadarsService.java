@@ -24,6 +24,7 @@ import org.springframework.data.mongodb.core.aggregation.AggregationResults;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -611,4 +612,16 @@ public class RadarsService {
         }
         return datas;
     }
+
+    /**
+     * ✅ LOCALIZAÇÕES PARA MAPA - Cache de 24 horas
+     */
+    /*@Cacheable(
+            value = "mapa-radares-appia",
+            unless = "#result == null || #result.isEmpty()"
+    )
+    @Transactional(readOnly = true)
+    public List<LocalizacaoRadarProjection> listarTodasLocalizacoes() {
+        return
+    }*/
 }

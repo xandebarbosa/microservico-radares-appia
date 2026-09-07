@@ -1,0 +1,45 @@
+networks:
+  radares-net:
+    external: true
+
+services:
+
+  # ═══════════════════════════════════════════════
+  #  MICROSSERVIÇO — Radar APPIA (Spring Boot)
+  # ═══════════════════════════════════════════════
+  microservico-radar-appia:
+    container_name: microservico-radares-appia
+    build:
+      context: ../microservico-radares-appia # Caminho relativo para a pasta do projeto
+    ports:
+      - "8092:8092"
+    env_file:
+      - .env
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+
+      # ── MongoDB ───────────────────────────────
+      - MONGODB_URI=mongodb:${URI_MONGODB}
+      - MONGODB_DATABASE=${DATABASE_MONGODB}
+
+      # ── RabbitMQ ──────────────────────────────
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USERNAME=${RABBITMQ_USER}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
+      - rabbitmq.exchange.name=radares_exchange
+      - rabbitmq.routing.key=radares.monitorasp
+
+      # ── CORS ──────────────────────────────────
+      - CORS_ORIGINS=http://localhost:5173,http://localhost:3000
+    networks:
+      - radares-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider",
+             "http://localhost:8091/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+  
