@@ -18,9 +18,13 @@ services:
     environment:
       - SPRING_PROFILES_ACTIVE=prod
 
-      # ── MongoDB ───────────────────────────────
-      - MONGODB_URI=mongodb:${URI_MONGODB}
-      - MONGODB_DATABASE=${DATABASE_MONGODB}
+      # ── MongoDB (Padrão Spring Data) ──────────
+      - SPRING_DATA_MONGODB_URI=mongodb:${URI_MONGODB}
+      - SPRING_DATA_MONGODB_DATABASE=${DATABASE_MONGODB}
+
+      # ── Redis (Cache) ─────────────────────────
+      - SPRING_DATA_REDIS_HOST=redis
+      - SPRING_DATA_REDIS_PORT=6379
 
       # ── RabbitMQ ──────────────────────────────
       - RABBITMQ_HOST=rabbitmq
@@ -28,7 +32,7 @@ services:
       - RABBITMQ_USERNAME=${RABBITMQ_USER}
       - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
       - rabbitmq.exchange.name=radares_exchange
-      - rabbitmq.routing.key=radares.monitorasp
+      - rabbitmq.routing.key=radares.appia
 
       # ── CORS ──────────────────────────────────
       - CORS_ORIGINS=http://localhost:5173,http://localhost:3000
@@ -41,7 +45,7 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider",
-             "http://localhost:8091/actuator/health"]
+             "http://localhost:8092/actuator/health"]
       interval: 30s
       timeout: 10s
       retries: 3

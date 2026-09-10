@@ -16,18 +16,14 @@ public class RadarMqPublisher {
 
     private final RabbitTemplate rabbitTemplate;
     @Value("${rabbitmq.exchange.name:radares_exchange}")
-    private final String exchange;
+    private String exchange;
+
     @Value("${rabbitmq.routing.key:radares.appia}")
-    private final String routingKey;
+    private String routingKey;
 
     // Injeção de dependência via construtor com valores do application.properties
-    public RadarMqPublisher(
-            RabbitTemplate rabbitTemplate,
-            String exchange, // Deixe default vazio se usar a exchange padrão
-            String routingKey) {
+    public RadarMqPublisher(RabbitTemplate rabbitTemplate) {
         this.rabbitTemplate = rabbitTemplate;
-        this.exchange = exchange;
-        this.routingKey = routingKey;
     }
 
     /**

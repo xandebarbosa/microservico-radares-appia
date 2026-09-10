@@ -9,8 +9,8 @@ RUN mvn dependency:go-offline
 
 # 3. Copia o código fonte
 COPY src ./src
-# 4. Compila e empacota
-RUN mvn clean package -DskipTests
+# 4. Compila e empacota forçando a leitura em UTF-8
+RUN mvn clean package -DskipTests -Dfile.encoding=UTF-8
 
 # Etapa 2: Imagem final com JRE (menor e mais segura)
 FROM eclipse-temurin:21-jre-alpine

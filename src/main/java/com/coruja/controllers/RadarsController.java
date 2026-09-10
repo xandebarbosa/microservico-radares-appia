@@ -4,16 +4,10 @@ import com.coruja.dto.*;
 import com.coruja.entity.Radars;
 import com.coruja.service.RadarsService;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import jakarta.ws.rs.DefaultValue;
-import jakarta.ws.rs.QueryParam;
-import jakarta.ws.rs.core.Response;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Sort;
-import org.springframework.data.web.PageableDefault;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -22,95 +16,126 @@ import org.springframework.web.bind.annotation.*;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.List;
-import java.util.Map;
 
 @CrossOrigin(origins = "${cors.origins}")
 @RestController
 @RequestMapping(value = "/radares")
-@RequiredArgsConstructor // O Lombok cria o construtor injetando o RadarsService automaticamente
+@RequiredArgsConstructor
 @Slf4j
 @Tag(name = "Radares (Appia)", description = "Endpoints para consulta, mapa e persistência de radares")
 public class RadarsController {
 
     private final RadarsService radarsService;
 
+    // ═══════════════════════════════════════════════════════════════
+    //  METADADOS E FILTROS DE RODOVIAS
+    // ═══════════════════════════════════════════════════════════════
 
     @Operation(summary = "Lista todas as rodovias disponíveis")
     @GetMapping("/rodovias")
-    public ResponseEntity<List<RodoviaDTO>> listarRodovias() {
+    public ResponseEntity<List<String>> listarRodovias() {
         log.info("🛣️ [APPIA] Listando rodovias");
-            return ResponseEntity.ok(radarsService.listarRodovias());
+
+        List<String> rodovias = radarsService.listarRodovias();
+
+        if (rodovias.isEmpty()) {
+            return ResponseEntity.noContent().build();
+        }
+
+        log.info("✅ [APPIA] Retornando {} rodovias", rodovias.size());
+        return ResponseEntity.ok(rodovias);
     }
 
-    @Operation(summary = "Lista os KMs pertencentes a uma rodovia específica")
-    @GetMapping("/rodovas/{rodoviaId}/kms")
-    public ResponseEntity<List<KmRodoviaDTO>> listarKmRodovias(@PathVariable Long rodoviaId) {
-        log.info("📍 [Cart] Listando KMs da rodovia ID: {}", rodoviaId);
-        List<KmRodoviaDTO> kmRodoviaDTOS = radarsService.listarKmsPorRodovia(rodoviaId);
-        log.info("✅ [Cart] Retornando {} KMs",  kmRodoviaDTOS.size());
-        return ResponseEntity.ok(kmRodoviaDTOS);
+    @Operation(summary = "Lista os KMs disponíveis. Pode ser filtrado por rodovia.")
+    @GetMapping("/kms")
+    public ResponseEntity<List<String>> listarKms(@RequestParam(value = "rodovia", required = false) String rodovia) {
+        log.info("📍 [APPIA] Listando KMs da rodovia: {}", rodovia != null ? rodovia : "Todas");
+
+        List<String> kms = radarsService.listarKmsPorRodovia(rodovia);
+
+        if (kms.isEmpty()) {
+            return ResponseEntity.noContent().build();
+        }
+
+        log.info("✅ [APPIA] Retornando {} KMs", kms.size());
+        return ResponseEntity.ok(kms);
     }
 
-    /**
-     * ✅ BUSCA POR FILTROS (Local)
-     * Endpoint para consulta operacional (Dia, Rodovia, Km, Hora).
-     * 'Data' é obrigatória para performance (cai na partição correta).
-     */
+    // ═══════════════════════════════════════════════════════════════
+    //  CONSULTAS PRINCIPAIS
+    // ═══════════════════════════════════════════════════════════════
+
     @Operation(summary = "Busca paginada de radares com filtros dinâmicos")
     @GetMapping("/busca-local")
     public ResponseEntity<RadarPageDTO> buscarComFiltros(
-            @RequestParam(required = false) String placa,
-            @RequestParam(required = false) String rodovia,
-            @RequestParam(required = false) String km,
-            @RequestParam(required = false) String sentido,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicial,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal,
-            @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "20") int size
-            ){
+            @Parameter(description = "Placa do veículos (exata)")
+            @RequestParam(value = "placa", required = false) String placa,
+
+            @Parameter(description = "Nome ou trecho da rodovia")
+            @RequestParam(value = "rodovia", required = false) String rodovia,
+
+            @Parameter(description = "Quilômetro exato")
+            @RequestParam(value = "km", required = false) String km,
+
+            @Parameter(description = "Sentido da via")
+            @RequestParam(value = "sentido", required = false) String sentido,
+
+            @Parameter(description = "Data da passagem (ISO: yyyy-MM-dd)")
+            @RequestParam(value = "data", required = false) String dataStr,
+
+            @Parameter(description = "Hora inicial do intervalo (ISO: HH:mm:ss)")
+            @RequestParam(value = "horaInicial", required = false) String horaInicialStr,
+
+            @Parameter(description = "Hora final do intervalo (ISO: HH:mm:ss)")
+            @RequestParam(value = "horaFinal", required = false) String horaFinalStr,
+
+            @Parameter(description = "Número da página (0-indexed)")
+            @RequestParam(value = "page", defaultValue = "0") int page,
+
+            @Parameter(description = "Tamanho da página")
+            @RequestParam(value = "size", defaultValue = "20") int size
+    ) {
+        LocalDate data = parseDate(dataStr);
+        LocalTime horaInicial = parseTime(horaInicialStr);
+        LocalTime horaFinal = parseTime(horaFinalStr);
+
         RadarPageDTO result = radarsService.buscarComFiltros(
                 placa, rodovia, km, sentido, data, horaInicial, horaFinal, page, size
         );
+
         return ResponseEntity.ok(result);
     }
 
     @Operation(summary = "Busca os radares capturados mais recentemente")
     @GetMapping("/ultimos")
-    public Response buscarUltimos(
-            @RequestParam(defaultValue = "20") int limite
+    public ResponseEntity<List<RadarsDTO>> buscarUltimos(
+            @RequestParam(value = "limite", defaultValue = "20") int limite
     ) {
+        log.info("⏳ [APPIA] Buscando os últimos {} radares", limite);
         List<RadarsDTO> ultimos = radarsService.buscarUltimos(limite);
+
         if (ultimos == null || ultimos.isEmpty()) {
-            return Response.status(Response.Status.NOT_FOUND)
-                    .entity(Map.of("status", 404, "erro", "Nenhum registro encontrado."))
-                    .build();
+            return ResponseEntity.noContent().build();
         }
-        log.info("Ultimos radares carregados da concessionária APPIA {}", ultimos.size());
-        return Response.ok(ultimos).build();
+
+        return ResponseEntity.ok(ultimos);
     }
 
-    /**
-     * ✅ BUSCA POR PLACA
-     * Endpoint específico e otimizado para histórico completo de uma placa.
-     */
     @Operation(summary = "Busca o histórico paginado de uma placa específica")
     @GetMapping("/busca-placa")
     public ResponseEntity<RadarPageDTO> buscaPorPlaca(
-                @PathVariable String placa,
-                @RequestParam(defaultValue = "0") int page,
-                @RequestParam(defaultValue = "20") int size
-            ) {
-                log.info("Buscando por placa: {}", placa);
-                return ResponseEntity.ok(radarsService.buscarPorPlaca(placa, page, size));
+            @RequestParam(value = "placa") String placa,
+            @RequestParam(value = "page", defaultValue = "0") int page,
+            @RequestParam(value = "size", defaultValue = "20") int size
+    ) {
+        log.info("🔎 [APPIA] Buscando histórico para a placa: {}", placa);
+        RadarPageDTO result = radarsService.buscarPorPlaca(placa, page, size);
+        return ResponseEntity.ok(result);
     }
 
     @Operation(summary = "Gera um resumo consolidado das passagens de uma placa")
     @GetMapping("/placa/{placa}/resumo")
     public ResponseEntity<PlacaResumoDTO> resumoPorPlaca(@PathVariable String placa) {
-        // Solução Arquitetural: O método de resumo no service pede o "total" de passagens.
-        // Em vez de obrigar o frontend a mandar esse número, fazemos uma busca super leve (size=1)
-        // apenas para aproveitar o count() ultra-rápido do MongoDB e repassamos o total.
         RadarPageDTO pageDTO = radarsService.buscarPorPlaca(placa, 0, 1);
         long totalRegistros = pageDTO.getPageMetadata().getTotalElements();
 
@@ -124,46 +149,68 @@ public class RadarsController {
     // ═══════════════════════════════════════════════════════════════
     //  GEOGRAFIA E MAPA
     // ═══════════════════════════════════════════════════════════════
-    @Operation(summary = "Retorna todas as localizações únicas de radares para popular o mapa")
+
+    @Operation(summary = "Retorna localizações de radares dentro de um raio geográfico")
     @GetMapping("/geo-search")
     public ResponseEntity<RadarPageDTO> buscarPorLocalizacao(
             @RequestParam("latitude") Double latitude,
             @RequestParam("longitude") Double longitude,
             @RequestParam(value = "raio", required = false, defaultValue = "15000.0") Double raioMetros,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicial,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal,
-            @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "10") int size
+            @RequestParam(value = "data", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
+            @RequestParam(value = "horaInicial", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicial,
+            @RequestParam(value = "horaFinal", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal,
+            @RequestParam(value = "page", defaultValue = "0") int page,
+            @RequestParam(value = "size", defaultValue = "20") int size
     ) {
+        log.info("🌍 [APPIA] Busca geoespacial | Lat: {} | Long: {} | Raio: {}m", latitude, longitude, raioMetros);
+
         RadarPageDTO result = radarsService.buscaGeografica(
                 latitude, longitude, raioMetros, data, horaInicial, horaFinal, page, size
         );
+
         return ResponseEntity.ok(result);
+    }
+
+    @Operation(summary = "Retorna todas as localizações únicas para popular o mapa global")
+    @GetMapping("/all-locations")
+    public ResponseEntity<List<RadarLocationDTO>> getRadarLocations() {
+        log.info("🗺️ [APPIA] Buscando todas as localizações estruturadas");
+
+        List<RadarLocationDTO> locations = radarsService.carregarCoordenadasAgrupadas();
+
+        if (locations.isEmpty()) {
+            return ResponseEntity.noContent().build();
+        }
+
+        log.info("✅ [APPIA] Retornando {} localizações", locations.size());
+        return ResponseEntity.ok(locations);
     }
 
     // ═══════════════════════════════════════════════════════════════
     //  PERSISTÊNCIA (RABBITMQ E MONGODB)
     // ═══════════════════════════════════════════════════════════════
+
     @Operation(summary = "Salva uma lista de radares no banco e publica no RabbitMQ")
     @PostMapping("")
-    public ResponseEntity<Void> salvarRadares(List<Radars> radars) {
+    public ResponseEntity<Void> salvarRadares(@RequestBody List<Radars> radars) {
+        log.info("📥 [APPIA] Recebendo lote de {} radares para persistência", radars.size());
         radarsService.salvarRadares(radars);
         return ResponseEntity.status(HttpStatus.CREATED).build();
     }
 
-    // ==================================================================================
-    // 3. COMPATIBILIDADE / LEGADO (MAPA)
-    // ==================================================================================
-    /*@GetMapping("/all-locations")
-    public ResponseEntity<List<LocalizacaoRadarProjection>> getRadarLocations() {
-        log.info("🗺️ [APPIA] Buscando todas as localizações");
+    // ═══════════════════════════════════════════════════════════════
+    //  MÉTODOS PRIVADOS AUXILIARES
+    // ═══════════════════════════════════════════════════════════════
 
-        List<LocalizacaoRadarProjection> locations = radarsService.listarTodasLocalizacoes();
+    private LocalDate parseDate(String str) {
+        if (str == null || str.isBlank()) return null;
+        try { return LocalDate.parse(str); }
+        catch (Exception e) { return null; }
+    }
 
-        log.info("✅ [APPIA] Retornando {} localizações",  locations.size());
-
-        return ResponseEntity.of(locations);
-    }*/
-
+    private LocalTime parseTime(String str) {
+        if (str == null || str.isBlank()) return null;
+        try { return LocalTime.parse(str); }
+        catch (Exception e) { return null; }
+    }
 }
