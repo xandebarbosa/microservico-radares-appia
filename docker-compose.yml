@@ -32,6 +32,10 @@ services:
 
       # ── CORS ──────────────────────────────────
       - CORS_ORIGINS=http://localhost:5173,http://localhost:3000
+
+      # ── EUREKA ──────────────────────────────────
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
+      - EUREKA_INSTANCE_PREFER_IP_ADDRESS=true
     networks:
       - radares-net
     restart: unless-stopped
