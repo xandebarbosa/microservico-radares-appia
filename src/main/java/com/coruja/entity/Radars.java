@@ -4,11 +4,13 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import lombok.ToString;
-import org.bson.codecs.pojo.annotations.BsonId;
-import org.bson.codecs.pojo.annotations.BsonIgnore;
-import org.bson.codecs.pojo.annotations.BsonProperty;
 import org.bson.types.ObjectId;
+import org.springframework.data.annotation.Id;
+import org.springframework.data.annotation.Transient;
 import org.springframework.data.mongodb.core.mapping.Document;
+import org.springframework.data.mongodb.core.mapping.Field;
+
+import java.util.Date;
 
 @Document(collection = "Appia")
 @Getter
@@ -16,43 +18,51 @@ import org.springframework.data.mongodb.core.mapping.Document;
 @NoArgsConstructor
 @ToString
 public class Radars {
-    @BsonId
-    private ObjectId id;
+    @Id
+    private String id;
 
-    @BsonProperty("DATA")
+    // A anotação @Field é a única que o Spring lê para mapear nomes no banco
+    @Field("DATA")
     private String data;
 
-    @BsonProperty("HORA")
+    @Field("HORA")
     private String hora;
 
-    @BsonProperty("PLACA")
+    @Field("PLACA")
     private String placa;
 
-    @BsonProperty("SENTIDO")
+    @Field("SENTIDO")
     private String sentido;
 
-    @BsonProperty("LOCAL")
+    @Field("LOCAL")
     private String local;
 
-    @BsonProperty("LATITUDE")
-    private Double latitude;
+    // Mantido como String para evitar erro de parse com a vírgula do MongoDB
+    @Field("LATITUDE")
+    private String latitude;
 
-    @BsonProperty("LONGITUDE")
-    private Double longitude;
+    @Field("LONGITUDE")
+    private String longitude;
 
-    /** * Campo fixo para a Concessionária.
-     * @BsonIgnore garante que o Mongo não tente ler/gravar essa informação.
+    // Campo vital para a ordenação cronológica que implementamos no Service
+    @Field("CRIADOEM")
+    private Date criadoEm;
+
+    /**
+     * Campo fixo para a Concessionária.
+     * @Transient garante que o Spring não tente ler/gravar essa informação no banco.
      */
-    @BsonIgnore
+    @Transient
     private String concessionaria = "Appia";
 
-    public Radars(ObjectId id, String data, String hora, String placa, String sentido, String local, Double latitude, Double longitude) {
+    public Radars(String id, String data, String hora, String placa, String sentido, String local, String latitude, String longitude, Date criadoEm) {
         this.id = id;
         this.data = data;
         this.hora = hora;
         this.placa = placa;
         this.sentido = sentido;
         this.local = local;
+        this.criadoEm = criadoEm;
         this.latitude = latitude;
         this.longitude = longitude;
     }

@@ -6,8 +6,11 @@ import com.coruja.messaging.RadarMqPublisher;
 import com.coruja.repository.RadarsRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.bson.Document;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.cache.annotation.Cacheable;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.event.EventListener;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -53,15 +56,33 @@ public class RadarsService {
     );
 
     // Regex para extrair "SP 310" e "240.40" de "Rodovia: SP 310 KM:240.40"
-    private static final Pattern LOCAL_PATTERN = Pattern.compile("(?i)Rodovia:\\s*(.*?)\\s*KM:\\s*([0-9]+(?:[.,][0-9]+)?)");
+    private static final Pattern LOCAL_PATTERN = Pattern.compile("(?i)Rodovia:\\s*(.*?)\\s*KM:\\s*(?:KM)?\\s*([0-9]+(?:[.,][0-9]+)?)");
 
-    // Janela de dias para usar o índice por DATA em agregações de metadados
-    private static final int JANELA_DIAS_LOCAL = 7;
-    private static final String COLLECTION_NAME = "APPIA";
+    // Janela de dias usada na aggregation de metadados (rodovias/kms).
+    // Antes 7 dias fixo; agora configurável e ampliado para 45 dias, já
+    // que o cache passa a ser atualizado 1x/mês (job agendado) em vez de
+    // recalculado a cada TTL do Redis expirar — uma janela maior evita
+    // que rodovia/km de baixo tráfego "sumam" do cache.
+    @Value("${radares.cache.janela-dias:45}")
+    private int janelaDiasLocal;
+    private static final String COLLECTION_NAME = "Appia";
 
     private final RadarsRepository radarsRepository;
     private final RadarMqPublisher mqPublisher;
     private final MongoTemplate mongoTemplate;
+
+    @org.springframework.beans.factory.annotation.Value("${spring.data.mongodb.uri:NENHUMA_URI_LIDA}")
+    private String uriConfigurada;
+
+    // Auto-referência via proxy: chamadas internas a métodos @Cacheable
+    // (this.metodo()) NÃO passam pelo proxy AOP do Spring, então o
+    // @Cacheable é silenciosamente ignorado nelas — nem lê nem escreve
+    // no Redis, só recalcula toda vez. Usando "self" (injetado como
+    // @Lazy para evitar dependência circular na criação do bean), as
+    // chamadas internas passam pelo proxy normalmente.
+    @Lazy
+    @Autowired
+    private RadarsService self;
 
     public RadarsService(RadarsRepository radarsRepository, RadarMqPublisher mqPublisher, MongoTemplate mongoTemplate) {
         this.radarsRepository = radarsRepository;
@@ -73,11 +94,23 @@ public class RadarsService {
 
     @EventListener(ApplicationReadyEvent.class)
     public void inicializarCacheAssincrono() {
+        log.info("================================================================");
+        log.info("🕵️ DIAGNÓSTICO DE CONEXÃO MONGODB");
+        log.info("🔗 URI carregada pelo Spring: {}", uriConfigurada);
+        log.info("📂 Banco de dados ativo no MongoTemplate: {}", mongoTemplate.getDb().getName());
+        log.info("================================================================");
+
         CompletableFuture.runAsync(() -> {
             log.info("🔥 Iniciando pré-aquecimento de cache no Redis (background)...");
             try {
-                listarKmsAgrupados();
-                carregarCoordenadasAgrupadas();
+                // Chamadas via "self" — não "this." — para passar pelo
+                // proxy do Spring e realmente popular o Redis. Antes o
+                // warm-up chamava this.listarKmsAgrupados() diretamente:
+                // computava o resultado e JOGAVA FORA, sem cachear nada.
+                self.listarRodovias();
+                self.listarKmsPorRodovia(null);
+                self.listarKmsAgrupados();
+                self.carregarCoordenadasAgrupadas();
                 log.info("✅ Cache pré-aquecido com sucesso.");
             } catch (Exception e) {
                 log.error("⚠️ Falha no pré-aquecimento do cache: {}", e.getMessage(), e);
@@ -93,56 +126,140 @@ public class RadarsService {
         if (localBruto == null || localBruto.isBlank()) return new RodoviaKm("", "");
         Matcher matcher = LOCAL_PATTERN.matcher(localBruto);
         if (matcher.find()) {
-            return new RodoviaKm(matcher.group(1).trim(), matcher.group(2).trim());
+            String rodovia = matcher.group(1).trim();
+            // Substitui a vírgula (ou ponto, se houver) pelo sinal de mais (+)
+            String km = matcher.group(2).trim().replace(",", "+").replace(".", "+");
+            return new RodoviaKm(rodovia, km);
         }
         return new RodoviaKm(localBruto.trim(), "");
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  EXTRAÇÃO GLOBAL DE RODOVIAS E KMS (SEM FILTRO DE DATA)
+    //  METADADOS DE RODOVIAS E KMS (AGGREGATION COM JANELA — SEM SCAN FULL)
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Extrai todas as rodovias distintas de toda a base de dados.
+     * Monta o mapa rodovia → KMs distintos via UMA aggregation com janela
+     * de dias (usa o índice por DATA em vez de varrer a coleção inteira).
+     * Método privado, SEM @Cacheable: quem cacheia é quem chama —
+     * listarRodovias(), listarKmsPorRodovia() e listarKmsAgrupados() cada
+     * um guarda seu próprio resultado no Redis, sob sua própria chave.
+     * (Chamar um método @Cacheable de dentro da própria classe não passa
+     * pelo proxy do Spring, então o cache dele seria ignorado — por isso
+     * a lógica fica aqui, fora de qualquer método anotado.)
      */
-    @Cacheable(value = "todas-rodovias-appia")
-    public List<String> listarRodovias() {
-        log.info("🔍 Extraindo todas as rodovias distintas do banco de dados...");
+    private Map<String, List<String>> construirMapaRodoviasKms() {
+        log.info("Consultando Locais via aggregation (janela de {} dias)...", janelaDiasLocal);
+        long inicio = System.currentTimeMillis();
 
-        List<String> locaisUnicos = mongoTemplate.findDistinct(new Query(), "LOCAL", COLLECTION_NAME, String.class);
+        List<String> datasRecentes = buildDateRange(janelaDiasLocal);
 
-        return locaisUnicos.stream()
-                .filter(local -> local != null && !local.isBlank())
-                .map(this::extrairRodoviaKm)
-                .map(RodoviaKm::rodovia)
-                .filter(rodovia -> !rodovia.isBlank())
-                .distinct()
-                .sorted(String.CASE_INSENSITIVE_ORDER)
-                .toList();
+        Aggregation aggregation = Aggregation.newAggregation(
+                Aggregation.match(Criteria.where("DATA").in(datasRecentes)),
+                Aggregation.group("LOCAL"),
+                Aggregation.match(Criteria.where("_id").ne(null)),
+                Aggregation.sort(Sort.Direction.ASC, "_id")
+        );
+
+        AggregationResults<Document> results = mongoTemplate.aggregate(aggregation, COLLECTION_NAME, Document.class);
+
+        Map<String, Set<String>> kmsPorRodoviaTemp = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        List<String> locaisNaoReconhecidos = new ArrayList<>();
+
+        for (Document doc : results.getMappedResults()) {
+            String local = doc.getString("_id");
+            RodoviaKm rk = extrairRodoviaKm(local);
+            if (!rk.rodovia().isBlank()) {
+                kmsPorRodoviaTemp.computeIfAbsent(rk.rodovia(), k -> new TreeSet<>()).add(rk.km());
+            } else if (local != null && !local.isBlank()) {
+                // LOCAL não bateu com o padrão "Rodovia: X KM: Y" — fica de
+                // fora do cache. Logar ajuda a achar dado mal formatado na
+                // origem em vez de simplesmente "sumir" para o front.
+                locaisNaoReconhecidos.add(local);
+            }
+        }
+
+        if (!locaisNaoReconhecidos.isEmpty()) {
+            log.warn("⚠️ {} LOCAL(is) não reconheceram o padrão 'Rodovia: X KM: Y' e ficaram de fora do cache: {}",
+                    locaisNaoReconhecidos.size(), locaisNaoReconhecidos);
+        }
+
+        Map<String, List<String>> processados = new LinkedHashMap<>();
+        kmsPorRodoviaTemp.forEach((rodovia, kms) -> processados.put(rodovia, new ArrayList<>(kms)));
+
+        log.info("=== RODOVIAS E KMs CARREGADOS (APPIA) ===");
+        processados.forEach((rodovia, kms) ->
+                log.info("🛣️ Rodovia: {} | 📍 Total de KMs: {} | Valores: {}", rodovia, kms.size(), kms));
+        log.info("==========================================");
+
+        log.info("Agregação finalizada em {}ms — {} rodovias, {} LOCALs distintos extraídos.",
+                System.currentTimeMillis() - inicio, processados.size(), results.getMappedResults().size());
+
+        return processados;
     }
 
     /**
-     * Extrai todos os KMs distintos.
-     * Se a rodovia for informada, filtra os KMs apenas daquela rodovia.
+     * Lista todas as rodovias distintas (dentro da janela de dias).
+     * Antes fazia um findDistinct SEM filtro na coleção inteira — trocado
+     * pela aggregation com janela, index-friendly.
+     */
+    @Cacheable(value = "todas-rodovias-appia")
+    public List<RodoviaDTO> listarRodovias() {
+        log.info("🔍 Extraindo rodovias distintas a partir da aggregation com janela...");
+
+        List<String> nomesOrdenados = construirMapaRodoviasKms().keySet().stream()
+                .sorted(String.CASE_INSENSITIVE_ORDER)
+                .toList();
+
+        List<RodoviaDTO> dtos = new ArrayList<>();
+        for (int i = 0; i < nomesOrdenados.size(); i++) {
+            dtos.add(RodoviaDTO.builder()
+                    .id((long) (i + 1))
+                    .nome(nomesOrdenados.get(i))
+                    .build());
+        }
+        return dtos;
+    }
+
+    /**
+     * Devolve o nome da rodovia a partir do ID estável gerado em
+     * listarRodovias() (mesmo padrão do monitorasp). Necessário porque o
+     * BFF chama /radares/rodovias/{id}/kms usando o id que recebeu de
+     * /radares/rodovias — antes esse endpoint nem existia no Appia.
+     */
+    public String getRodoviaById(Long rodoviaId) {
+        List<RodoviaDTO> rodovias = self.listarRodovias();
+        return rodovias.stream()
+                .filter(r -> r.getId().equals(rodoviaId))
+                .map(RodoviaDTO::getNome)
+                .findFirst()
+                .orElse(null);
+    }
+
+    /**
+     * Lista os KMs distintos (de uma rodovia específica, ou de todas).
+     * Antes fazia um findDistinct com regex "(?i)" SEM filtro de data —
+     * regex case-insensitive não usa índice, virava COLLSCAN na coleção
+     * inteira. Trocado pela mesma aggregation windowed usada acima.
      */
     @Cacheable(value = "todos-kms-appia", key = "#rodovia != null ? #rodovia.toUpperCase().trim() : 'TODOS'")
     public List<String> listarKmsPorRodovia(String rodovia) {
         log.info("🔍 Extraindo KMs distintos (Rodovia: {})...", rodovia != null ? rodovia : "Todas");
 
-        Query query = new Query();
-        if (rodovia != null && !rodovia.isBlank()) {
-            // Aplica filtro usando regex para buscar apenas os "LOCAL" que contêm esta rodovia
-            query.addCriteria(Criteria.where("LOCAL").regex("(?i)Rodovia:\\s*" + Pattern.quote(rodovia.trim()) + ".*"));
+        Map<String, List<String>> mapa = construirMapaRodoviasKms();
+
+        List<String> kms;
+        if (rodovia == null || rodovia.isBlank()) {
+            kms = mapa.values().stream().flatMap(List::stream).distinct().toList();
+        } else {
+            String chave = mapa.keySet().stream()
+                    .filter(r -> r.equalsIgnoreCase(rodovia.trim()))
+                    .findFirst()
+                    .orElse(null);
+            kms = chave != null ? mapa.get(chave) : List.of();
         }
 
-        List<String> locaisUnicos = mongoTemplate.findDistinct(query, "LOCAL", COLLECTION_NAME, String.class);
-
-        return locaisUnicos.stream()
-                .filter(local -> local != null && !local.isBlank())
-                .map(this::extrairRodoviaKm)
-                .map(RodoviaKm::km)
-                .filter(km -> !km.isBlank())
-                .distinct()
+        return kms.stream()
                 // Comparador customizado para ordenar KMs numericamente (ex: 20,500 antes de 100,000)
                 .sorted((km1, km2) -> {
                     try {
@@ -162,36 +279,7 @@ public class RadarsService {
 
     @Cacheable(value = "opcoes-filtro-appia")
     public Map<String, List<String>> listarKmsAgrupados() {
-        log.info("Consultando Locais via aggregation (janela de {} dias)...", JANELA_DIAS_LOCAL);
-        long inicio = System.currentTimeMillis();
-
-        List<String> datasRecentes = buildDateRange(JANELA_DIAS_LOCAL);
-
-        Aggregation aggregation = Aggregation.newAggregation(
-                Aggregation.match(Criteria.where("DATA").in(datasRecentes)),
-                Aggregation.group("LOCAL"),
-                Aggregation.match(Criteria.where("_id").ne(null)),
-                Aggregation.sort(Sort.Direction.ASC, "_id")
-        );
-
-        AggregationResults<Document> results = mongoTemplate.aggregate(aggregation, COLLECTION_NAME, Document.class);
-
-        Map<String, Set<String>> kmsPorRodoviaTemp = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-
-        for (Document doc : results.getMappedResults()) {
-            RodoviaKm rk = extrairRodoviaKm(doc.getString("_id"));
-            if (!rk.rodovia().isBlank()) {
-                kmsPorRodoviaTemp.computeIfAbsent(rk.rodovia(), k -> new TreeSet<>()).add(rk.km());
-            }
-        }
-
-        Map<String, List<String>> processados = new LinkedHashMap<>();
-        kmsPorRodoviaTemp.forEach((rodovia, kms) -> processados.put(rodovia, new ArrayList<>(kms)));
-
-        log.info("Agregação finalizada em {}ms — {} LOCALs distintos extraídos.",
-                System.currentTimeMillis() - inicio, results.getMappedResults().size());
-
-        return processados;
+        return construirMapaRodoviasKms();
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -255,7 +343,7 @@ public class RadarsService {
         double raio = (raioMetros != null) ? raioMetros : 15000.0;
         List<String> locaisNoRaio = new ArrayList<>();
 
-        for (RadarLocationDTO coord : carregarCoordenadasAgrupadas()) {
+        for (RadarLocationDTO coord : self.carregarCoordenadasAgrupadas()) {
             if (coord.getLatitude() == null || coord.getLongitude() == null) continue;
 
             double distancia = calcularDistanciaHaversine(latCentro, lngCentro, coord.getLatitude(), coord.getLongitude());
@@ -422,13 +510,16 @@ public class RadarsService {
             query.addCriteria(Criteria.where("PLACA").regex("(?i).*" + Pattern.quote(placa.trim()) + ".*"));
         }
 
+        // REVERSÃO: Transforma o "12+625" recebido do front de volta para "12,625" para achar no BD
+        String kmNormalizado = (km != null && !km.isBlank()) ? km.trim().replace("+", ",") : null;
+
         if (rodovia != null && !rodovia.isBlank()) {
-            String regexLocal = (km != null && !km.isBlank())
-                    ? "(?i)Rodovia:\\s*" + Pattern.quote(rodovia.trim()) + ".*KM:\\s*" + Pattern.quote(km.trim())
+            String regexLocal = (kmNormalizado != null)
+                    ? "(?i)Rodovia:\\s*" + Pattern.quote(rodovia.trim()) + ".*KM:\\s*" + Pattern.quote(kmNormalizado)
                     : "(?i)Rodovia:\\s*" + Pattern.quote(rodovia.trim()) + ".*";
             query.addCriteria(Criteria.where("LOCAL").regex(regexLocal));
-        } else if (km != null && !km.isBlank()) {
-            query.addCriteria(Criteria.where("LOCAL").regex("(?i).*KM:\\s*" + Pattern.quote(km.trim()) + ".*"));
+        } else if (kmNormalizado != null) {
+            query.addCriteria(Criteria.where("LOCAL").regex("(?i).*KM:\\s*" + Pattern.quote(kmNormalizado) + ".*"));
         }
 
         if (sentido != null && !sentido.isBlank()) {
@@ -441,10 +532,23 @@ public class RadarsService {
 
     private List<String> findDistinct(String field, Query query) {
         query.addCriteria(Criteria.where(field).ne(null));
-        return mongoTemplate.findDistinct(query, field, Radars.class, String.class).stream()
+        return mongoTemplate.findDistinct(query, field, COLLECTION_NAME, String.class).stream()
                 .filter(s -> !s.isBlank())
                 .sorted()
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * Converte coordenadas com vírgula do MongoDB para Double do Java de forma segura.
+     */
+    private Double converterCoordenadaSegura(String coordenada) {
+        if (coordenada == null || coordenada.isBlank()) return null;
+        try {
+            return Double.parseDouble(coordenada.trim().replace(",", "."));
+        } catch (NumberFormatException e) {
+            log.warn("Falha ao converter coordenada: {}", coordenada);
+            return null;
+        }
     }
 
     private RadarsDTO converterParaDTO(Radars r) {

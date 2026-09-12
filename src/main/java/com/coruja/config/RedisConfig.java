@@ -92,20 +92,34 @@ public class RedisConfig {
             cacheConfigs.put("radars-geo-appia",
                     defaultConfig.entryTtl(Duration.ofMinutes(15)));
 
-            // 4. Cache de filtros/metadata (longo - dados estáveis)
+            // 4. Cache de filtros/metadata (agora atualizado 1x/mês via job
+            // agendado — RadarCacheScheduler — em vez de depender do TTL.
+            // TTL aqui é só rede de segurança, caso o job falhe.
             cacheConfigs.put("opcoes-filtro-appia",
-                    defaultConfig.entryTtl(Duration.ofHours(2)));
+                    defaultConfig.entryTtl(Duration.ofHours(24)));
 
-            // 5. Cache de KMs por rodovia (médio - atrelado à leitura de KMs distintos)
-            cacheConfigs.put("kms-rodovia-appia",
-                    defaultConfig.entryTtl(Duration.ofMinutes(30)));
+            // 5. Lista de rodovias distintas (endpoint /radares/rodovias).
+            // Nome alinhado com @Cacheable("todas-rodovias-appia") no
+            // RadarsService — antes esse cache nem tinha entrada aqui e
+            // caía no TTL padrão de 10 min.
+            cacheConfigs.put("todas-rodovias-appia",
+                    defaultConfig.entryTtl(Duration.ofHours(24)));
 
-            // 6. Cache das coordenadas JSON do mapa (muito longo - raramente mudam)
+            // 6. KMs por rodovia (endpoint /radares/kms). Nome corrigido
+            // para bater com @Cacheable("todos-kms-appia") — antes estava
+            // como "kms-rodovia-appia" aqui e nunca era aplicado.
+            cacheConfigs.put("todos-kms-appia",
+                    defaultConfig.entryTtl(Duration.ofHours(24)));
+
+            // 7. Cache das coordenadas JSON do mapa (muito longo - raramente mudam)
             cacheConfigs.put("mapa-radares-appia",
                     defaultConfig.entryTtl(Duration.ofHours(24)));
 
-            // 7. Cache de localizações fixas (BFF)
-            cacheConfigs.put("locais-radares-bff-appia",
+            // 8. Cache de busca geográfica (raio ao redor de um ponto).
+            // Nome alinhado com @Cacheable("locais-radares-bff") — antes
+            // estava como "locais-radares-bff-appia" aqui e nunca era
+            // aplicado (caía no TTL padrão de 10 min do cache default).
+            cacheConfigs.put("locais-radares-bff",
                     defaultConfig.entryTtl(Duration.ofHours(24)));
 
             builder.withInitialCacheConfigurations(cacheConfigs);
@@ -123,3 +137,4 @@ public class RedisConfig {
                 .build();
     }
 }
+

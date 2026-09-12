@@ -1,5 +1,6 @@
 package com.coruja.controllers;
 
+import com.coruja.config.RadarCacheScheduler;
 import com.coruja.dto.*;
 import com.coruja.entity.Radars;
 import com.coruja.service.RadarsService;
@@ -15,7 +16,9 @@ import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 @CrossOrigin(origins = "${cors.origins}")
 @RestController
@@ -26,17 +29,25 @@ import java.util.List;
 public class RadarsController {
 
     private final RadarsService radarsService;
+    private final RadarCacheScheduler radarCacheScheduler;
 
     // ═══════════════════════════════════════════════════════════════
     //  METADADOS E FILTROS DE RODOVIAS
     // ═══════════════════════════════════════════════════════════════
 
+    @Operation(summary = "Força a atualização manual do cache de rodovias/kms")
+    @PostMapping("/rodovias/atualizar-cache")
+    public ResponseEntity<Void> atualizarCacheRodovias() {
+        radarCacheScheduler.forcarAtualizacao();
+        return ResponseEntity.ok().build();
+    }
+
     @Operation(summary = "Lista todas as rodovias disponíveis")
     @GetMapping("/rodovias")
-    public ResponseEntity<List<String>> listarRodovias() {
+    public ResponseEntity<List<RodoviaDTO>> listarRodovias() {
         log.info("🛣️ [APPIA] Listando rodovias");
 
-        List<String> rodovias = radarsService.listarRodovias();
+        List<RodoviaDTO> rodovias = radarsService.listarRodovias();
 
         if (rodovias.isEmpty()) {
             return ResponseEntity.noContent().build();
@@ -59,6 +70,37 @@ public class RadarsController {
 
         log.info("✅ [APPIA] Retornando {} KMs", kms.size());
         return ResponseEntity.ok(kms);
+    }
+
+    @Operation(summary = "Lista os KMs de uma rodovia pelo ID")
+    @GetMapping("/rodovias/{rodoviaId}/kms")
+    public ResponseEntity<?> listarKmsPorId(@PathVariable Long rodoviaId) {
+        String nomeRodovia = radarsService.getRodoviaById(rodoviaId);
+
+        if (nomeRodovia == null) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("status", 404, "erro", "Rodovia com ID " + rodoviaId + " não encontrada."));
+        }
+
+        log.info("📍 [APPIA] Buscando KMs para rodovia ID={} → '{}'", rodoviaId, nomeRodovia);
+
+        List<String> kms = radarsService.listarKmsPorRodovia(nomeRodovia);
+
+        List<KmRodoviaDTO> resultado = new ArrayList<>();
+        for (int i = 0; i < kms.size(); i++) {
+            resultado.add(KmRodoviaDTO.builder()
+                    .id((long) (i + 1))
+                    .valor(kms.get(i))
+                    .rodoviaId(rodoviaId)
+                    .build());
+        }
+
+        if (resultado.isEmpty()) {
+            return ResponseEntity.noContent().build();
+        }
+
+        log.info("✅ [APPIA] Retornando {} KMs (rodoviaId={})", resultado.size(), rodoviaId);
+        return ResponseEntity.ok(resultado);
     }
 
     // ═══════════════════════════════════════════════════════════════
